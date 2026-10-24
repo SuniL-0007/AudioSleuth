@@ -29,6 +29,17 @@ MODEL_LOCK = threading.Lock()
 TEXT_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 CLAP_MODEL = "laion/clap-htsat-unfused"
 INDEX_VERSION = 1
+# Failures that mean "this optional model is unusable here": missing packages, absent
+# weights, network errors, or an upstream API change (AttributeError) in a new release.
+BACKEND_ERRORS = (
+    ImportError,
+    OSError,
+    RuntimeError,
+    ValueError,
+    TypeError,
+    AttributeError,
+    HTTPError,
+)
 ACOUSTIC_AXES = (
     "loud",
     "quiet",
@@ -241,7 +252,7 @@ class DualIndex:
                     )
                 else:
                     audio = acoustic_query(query)[None, :]
-        except (ImportError, OSError, RuntimeError, ValueError, TypeError, HTTPError) as exc:
+        except BACKEND_ERRORS as exc:
             raise AudioSleuthError(
                 "The indexed encoder is unavailable. Re-index in offline mode; "
                 "query vectors cannot be mixed with a different model's index."
@@ -269,7 +280,7 @@ def build_index(chunks: list[Chunk], *, neural: bool = False) -> DualIndex:
             try:
                 text_vectors = _sentence_embeddings(transcripts)
                 text_backend = "sentence-transformers"
-            except (ImportError, OSError, RuntimeError, ValueError, TypeError, HTTPError) as exc:
+            except BACKEND_ERRORS as exc:
                 LOGGER.warning("Sentence embedding fallback (%s).", type(exc).__name__)
                 notices.append(
                     "Sentence-transformers was unavailable; text search uses lexical TF-IDF, "
@@ -284,7 +295,7 @@ def build_index(chunks: list[Chunk], *, neural: bool = False) -> DualIndex:
                     rows.append(_clap_audio(audio))
                 audio_vectors = normalize(np.stack(rows))
                 audio_backend = "CLAP"
-            except (ImportError, OSError, RuntimeError, ValueError, TypeError, HTTPError) as exc:
+            except BACKEND_ERRORS as exc:
                 LOGGER.warning("CLAP fallback (%s).", type(exc).__name__)
                 notices.append(
                     "CLAP was unavailable; acoustic search uses signal descriptors and a "

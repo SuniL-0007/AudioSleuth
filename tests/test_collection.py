@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 import service
-from app import add_callback, search_callback
+from app import MAX_RESULTS, add_callback, search_callback
 from retrieval import search
 from schemas import AudioSleuthError, Recording
 from service import Collection, add_to_collection, create_collection, dispose
@@ -84,14 +84,35 @@ def test_add_callback_outputs_and_episode_search(
     outputs = add_callback("second.wav", False, first)
     both = outputs[0]
     try:
-        assert len(outputs) == 26
+        assert len(outputs) == 8 + 3 * MAX_RESULTS + 4
         assert not first.directory.exists()
-        assert outputs[-3]["choices"][1:] == both.episodes()
+        assert outputs[-4]["choices"][1:] == both.episodes()
         results = search_callback(
             "interest rates", 1.0, "All speakers", 0, 0, both, "a" * 64, "bm25", "rrf"
         )
         assert "reciprocal rank fusion" in results[0]
         assert "Second episode" in results[2]
+    finally:
+        dispose(first)
+        dispose(both)
+
+
+def test_add_keeps_neural_mode_of_current_collection(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An unchecked box must not silently rebuild a neural collection with offline encoders."""
+    first = create_collection()
+    first.index.text_backend = "sentence-transformers"  # Pretend the current index is neural.
+    seen: list[bool] = []
+    real_build = service.build_index
+
+    def recording_build(chunks: list, *, neural: bool = False):  # type: ignore[no-untyped-def]
+        seen.append(neural)
+        return real_build(chunks, neural=False)  # Avoid loading real models in tests.
+
+    monkeypatch.setattr(service, "ingest_upload", lambda _: second_episode(first.recording))
+    monkeypatch.setattr(service, "build_index", recording_build)
+    both = add_to_collection(first, upload=Path("second.wav"))
+    try:
+        assert seen == [True]
     finally:
         dispose(first)
         dispose(both)

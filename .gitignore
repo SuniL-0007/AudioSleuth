@@ -1,5 +1,6 @@
 .venv/
 .venv-ml/
+.venv-asr/
 .vscode/
 .env
 .env.*
@@ -11,3 +12,4 @@ __pycache__/
 .runtime/
 *.log
 assets/_generated/
+evaluation/data/

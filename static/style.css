@@ -20,6 +20,12 @@
   --as-mint-text: #187f6e;
   --as-violet-bg: #eee7f7;
   --as-violet-text: #7754a0;
+  --as-amber-bg: #fbefd9;
+  --as-amber-text: #8a5a12;
+  --as-sky-bg: #e1eefb;
+  --as-sky-text: #2b62a3;
+  --as-neutral-bg: #e8edf0;
+  --as-neutral-text: #5b6f78;
 }
 .dark {
   --as-ink: #e3eef2;
@@ -42,6 +48,12 @@
   --as-mint-text: #7fe0c8;
   --as-violet-bg: #2c2140;
   --as-violet-text: #c8b2ee;
+  --as-amber-bg: #3d2c12;
+  --as-amber-text: #f2c97a;
+  --as-sky-bg: #142c45;
+  --as-sky-text: #9cc6f2;
+  --as-neutral-bg: #22323a;
+  --as-neutral-text: #a9bcc4;
 }
 
 .gradio-container { max-width: 1240px !important; margin: auto !important; }
@@ -104,6 +116,9 @@
 .speaker { font-size: 11px; font-weight: 700; padding: 4px 8px; border-radius: 5px; }
 .mint { color: var(--as-mint-text); background: var(--as-mint-bg); }
 .violet { color: var(--as-violet-text); background: var(--as-violet-bg); }
+.amber { color: var(--as-amber-text); background: var(--as-amber-bg); }
+.sky { color: var(--as-sky-text); background: var(--as-sky-bg); }
+.neutral { color: var(--as-neutral-text); background: var(--as-neutral-bg); }
 .timecode { font-size: 12px; font-family: Consolas, monospace; color: var(--as-muted); }
 .score { margin-left: auto; font-size: 19px; color: var(--as-accent); font-weight: 700; }
 .score small { font-size: 11px; font-weight: 400; color: var(--as-muted); }

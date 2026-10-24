@@ -10,12 +10,17 @@ from schemas import Chunk
 
 @dataclass(frozen=True)
 class Span:
-    """A judged relevant moment in source seconds; grade 2 is primary, 1 is partial."""
+    """A judged relevant moment in source seconds; grade 2 is primary, 1 is partial.
+
+    source is a SHA-256 prefix naming the episode; without it a span matches the
+    same time range in any episode, which is only safe for single-recording runs.
+    """
 
     start: float
     end: float
     grade: int
     speaker: str | None = None
+    source: str | None = None
 
     def __post_init__(self) -> None:
         if not 0 <= self.start < self.end or self.grade not in (1, 2):
@@ -25,6 +30,8 @@ class Span:
 def matches(chunk: Chunk, span: Span, *, min_overlap: float = 0.5) -> bool:
     """Overlap must cover min_overlap of the shorter interval, so either may be longer."""
     if span.speaker is not None and chunk.speaker_id != span.speaker:
+        return False
+    if span.source is not None and not chunk.source_sha256.startswith(span.source):
         return False
     overlap = min(chunk.end_sec, span.end) - max(chunk.start_sec, span.start)
     shorter = min(chunk.end_sec - chunk.start_sec, span.end - span.start)

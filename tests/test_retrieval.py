@@ -131,3 +131,19 @@ def test_clap_windows_cover_tail_and_query_uses_same_encoder(
     vector = indexing._clap_audio(np.ones(21 * SAMPLE_RATE, dtype=np.float32))
     assert lengths == [480_000, 480_000, 48_000]
     np.testing.assert_array_equal(vector, [1, 0])
+
+
+def test_upstream_api_change_falls_back_visibly(
+    demo_collection: Collection, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A removed library method (AttributeError) degrades to offline encoders with notices."""
+
+    def removed(*_: Any) -> Any:
+        raise AttributeError("BertTokenizer has no attribute prepare_for_model")
+
+    monkeypatch.setattr(indexing, "_sentence_embeddings", removed)
+    monkeypatch.setattr(indexing, "_clap_audio", removed)
+    index = build_index(demo_collection.index.chunks, neural=True)
+    assert index.text_backend.startswith("TF-IDF")
+    assert index.audio_backend.startswith("Signal descriptors")
+    assert len(index.notices) == 2

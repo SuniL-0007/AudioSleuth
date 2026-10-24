@@ -25,12 +25,18 @@ from service import (  # noqa: E402
     add_to_collection,
     create_collection,
     dispose,
+    is_neural,
     reindex_collection,
 )
 
 ROOT = Path(__file__).parent
-MAX_RESULTS = 5
+MAX_RESULTS = 10
 ALL_EPISODES = "All episodes"
+SPEAKER_COLORS = ("mint", "violet", "amber", "sky")
+# Default text weight per backend, from the demo evaluation (evaluation/run_eval.py):
+# offline MRR is flat for alpha in [0.5, 0.95]; neural MRR rises with alpha because CLAP
+# adds little, so 0.9 keeps a small audio say for tone queries.
+DEFAULT_ALPHA = {"offline": 0.65, "neural": 0.9}
 SCORERS = [
     ("Index vectors (TF-IDF or MiniLM)", "vectors"),
     ("BM25 (Okapi, stopwords removed)", "bm25"),
@@ -95,6 +101,14 @@ def highlight(transcript: str, query: str) -> str:
     return "".join(result)
 
 
+def speaker_color(speaker_id: str) -> str:
+    """Stable palette slot from the label's trailing number; UNKNOWN stays neutral."""
+    digits = re.search(r"(\d+)$", speaker_id)
+    if digits is None:
+        return "neutral"
+    return SPEAKER_COLORS[int(digits.group(1)) % len(SPEAKER_COLORS)]
+
+
 def hit_card(
     hit: SearchHit,
     query: str,
@@ -106,7 +120,7 @@ def hit_card(
 ) -> str:
     """Display relevance separately from timing confidence and speaker overlap."""
     chunk = hit.chunk
-    color = "mint" if chunk.speaker_id.endswith("00") else "violet"
+    color = speaker_color(chunk.speaker_id)
     text_label = "Text BM25" if scorer == "bm25" else "Text cosine"
     text_score = f"{hit.text_score:.3f}" if alpha > 0 else "not evaluated"
     audio_score = f"{hit.audio_score:.3f}" if alpha < 1 else "not evaluated"
@@ -202,6 +216,7 @@ def _collection_outputs(collection: Collection, elapsed: float) -> list[Any]:
         gr.update(choices=[ALL_EPISODES, *collection.episodes()], value=ALL_EPISODES),
         gr.update(visible=True),
         gr.Tabs(selected="search"),
+        gr.update(value=DEFAULT_ALPHA["neural" if is_neural(index) else "offline"]),
     ]
 
 
@@ -239,7 +254,7 @@ def add_callback(upload: str | None, neural: bool, current: Collection | None) -
         raise gr.Error("Choose a WAV or MP3 file to add to the current collection.")
     start = time.perf_counter()
     try:
-        collection = add_to_collection(current, upload=Path(upload), neural=neural)
+        collection = add_to_collection(current, upload=Path(upload))  # Keeps current mode.
     except AudioSleuthError as exc:
         raise gr.Error(str(exc)) from exc
     outputs = _collection_outputs(collection, time.perf_counter() - start)
@@ -277,6 +292,7 @@ def clear_callback(current: Collection | None) -> list[Any]:
         gr.update(choices=[ALL_EPISODES], value=ALL_EPISODES),
         gr.update(visible=False),
         gr.Tabs(selected="ingest"),
+        gr.update(value=DEFAULT_ALPHA["offline"]),
         None,
     ]
 
@@ -436,7 +452,8 @@ def build_app() -> gr.Blocks:
                             add = gr.Button("Add to collection", variant="secondary")
                         gr.HTML(
                             "<p class='fine'><b>Process</b> replaces the collection; "
-                            "<b>Add</b> indexes another episode beside the current ones. "
+                            "<b>Add</b> indexes another episode beside the current ones, "
+                            "keeping the collection's embedding mode. "
                             "Speaker labels need <code>HF_TOKEN</code>; without it speakers "
                             "stay UNKNOWN rather than guessed.</p>"
                         )
@@ -513,7 +530,7 @@ def build_app() -> gr.Blocks:
                     alpha = gr.Slider(
                         0,
                         1,
-                        value=0.65,
+                        value=DEFAULT_ALPHA["offline"],
                         step=0.05,
                         label="Semantic weight alpha",
                         info="0 = audio / tone only · 1 = transcript only",
@@ -581,6 +598,7 @@ def build_app() -> gr.Blocks:
             episode,
             loaded,
             tabs,
+            alpha,
         ]
         demo.click(
             load_demo_callback,

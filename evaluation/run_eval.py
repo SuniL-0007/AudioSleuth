@@ -11,7 +11,13 @@ from typing import Any
 from evaluation.metrics import Span, score_query
 from retrieval import search
 from schemas import AudioSleuthError
-from service import Collection, create_collection, dispose, reindex_collection
+from service import (
+    Collection,
+    add_to_collection,
+    create_collection,
+    dispose,
+    reindex_collection,
+)
 
 QRELS = Path(__file__).with_name("qrels_demo.json")
 CONFIGS: list[dict[str, Any]] = [
@@ -28,14 +34,50 @@ CONFIGS: list[dict[str, Any]] = [
 DEPTH = 10  # Ranks retrieved per query; metrics read at most this far.
 
 
-def load_qrels(path: Path) -> list[dict[str, Any]]:
-    """Parse queries and validate spans so typos fail before any ranking runs."""
-    queries = json.loads(path.read_text(encoding="utf-8"))["queries"]
+def load_qrels(*paths: Path) -> list[dict[str, Any]]:
+    """Parse and merge qrels files, validating spans so typos fail before ranking.
+
+    A file-level "source_sha256_prefix" becomes the episode of every span in that
+    file that does not name its own "source", so files combine into one corpus.
+    """
+    queries: list[dict[str, Any]] = []
+    for path in paths:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        default = document.get("source_sha256_prefix")
+        for query in document["queries"]:
+            query["spans"] = [Span(**{"source": default, **span}) for span in query["spans"]]
+            if not query["spans"]:
+                raise ValueError(f"Query {query['id']} has no relevant spans.")
+            queries.append(query)
+    ids = [query["id"] for query in queries]
+    if len(set(ids)) != len(ids):
+        raise ValueError("Query ids must be unique across qrels files.")
+    return queries
+
+
+def check_sources(collection: Collection, queries: list[dict[str, Any]]) -> None:
+    """Every judged episode must be indexed, or its queries would silently score zero."""
+    indexed = [recording.source_sha256 for recording in collection.recordings]
     for query in queries:
-        query["spans"] = [Span(**span) for span in query["spans"]]
-        if not query["spans"]:
-            raise ValueError(f"Query {query['id']} has no relevant spans.")
-    return list(queries)
+        for span in query["spans"]:
+            if span.source and not any(sha.startswith(span.source) for sha in indexed):
+                raise AudioSleuthError(
+                    f"Query {query['id']} judges episode {span.source}, which is not indexed. "
+                    "Pass its recording with --audio (or keep the demo for demo qrels)."
+                )
+
+
+def build_corpus(audio: list[Path], *, include_demo: bool) -> Collection:
+    """Demo first (if kept), then each recording, all in one shared offline index."""
+    if not include_demo and not audio:
+        raise AudioSleuthError("Nothing to index: pass --audio or keep the demo.")
+    remaining = list(audio)
+    current = create_collection() if include_demo else create_collection(upload=remaining.pop(0))
+    for path in remaining:
+        grown = add_to_collection(current, upload=path, neural=False)
+        dispose(current)
+        current = grown
+    return current
 
 
 def evaluate(
@@ -63,18 +105,24 @@ def markdown_table(header: list[str], body: list[list[str]]) -> str:
 
 
 def run(
-    *, qrels: Path = QRELS, audio: Path | None = None, neural: bool = False, k: int = 5
+    *,
+    qrels: list[Path] | None = None,
+    audio: list[Path] | None = None,
+    include_demo: bool = True,
+    neural: bool = False,
+    k: int = 5,
 ) -> list[dict[str, Any]]:
-    """Evaluate every backend/alpha pair; each result carries per-query rows.
+    """Evaluate every backend/config pair; each result carries per-query rows.
 
-    Without audio, the bundled demo is used; an upload is transcribed once and
-    re-indexed for the neural pass so both backends rank identical chunks.
+    Recordings are transcribed once; the neural pass re-indexes the same chunks,
+    so both backends rank identical candidates.
     """
-    queries = load_qrels(qrels)
+    queries = load_qrels(*(qrels or [QRELS]))
     results = []
-    base = create_collection(upload=audio)
+    base = build_corpus(audio or [], include_demo=include_demo)
     collections = [base]
     try:
+        check_sources(base, queries)
         if neural:
             collections.append(reindex_collection(base, neural=True))
             index = collections[-1].index
@@ -128,8 +176,13 @@ def report(results: list[dict[str, Any]], *, per_query: bool = False) -> str:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--qrels", type=Path, default=QRELS)
-    parser.add_argument("--audio", type=Path, help="recording judged by --qrels (default: demo)")
+    parser.add_argument(
+        "--qrels", type=Path, action="append", help="qrels file; repeatable (default: demo)"
+    )
+    parser.add_argument(
+        "--audio", type=Path, action="append", default=[], help="extra recording; repeatable"
+    )
+    parser.add_argument("--no-demo", action="store_true", help="leave the bundled demo out")
     parser.add_argument("--neural", action="store_true", help="also re-index with MiniLM + CLAP")
     parser.add_argument("--k", type=int, default=5, help="cutoff for P@k, R@k, nDCG@k")
     parser.add_argument("--per-query", action="store_true")
@@ -138,7 +191,13 @@ def main() -> None:
     if not 1 <= args.k <= DEPTH:
         parser.error(f"--k must be between 1 and {DEPTH}.")
     try:
-        results = run(qrels=args.qrels, audio=args.audio, neural=args.neural, k=args.k)
+        results = run(
+            qrels=args.qrels,
+            audio=args.audio,
+            include_demo=not args.no_demo,
+            neural=args.neural,
+            k=args.k,
+        )
     except AudioSleuthError as exc:
         parser.exit(1, f"error: {exc}\n")
     print(report(results, per_query=args.per_query))

@@ -32,11 +32,21 @@ CLAP is also a general audio/text model, not a calibrated psychological
 state detector.
 
 The optional model adapters are implemented against the upstream APIs linked
-below. Real MiniLM, LAION-CLAP, and WhisperX CPU inference have now been
-exercised in the separate `.venv-ml` environment, including full neural
-indexing of the bundled recording. Authenticated speaker diarization remains
-unverified because no `HF_TOKEN` with model access is configured. The
-lightweight `.venv` remains usable independently.
+below. Real MiniLM and LAION-CLAP inference runs on transformers 4.57
+(Python 3.12) and 5.20 (Python 3.14). WhisperX CPU transcription has been
+verified on Python 3.12, including a 12-minute real interview (see
+**Retrieval evaluation**). Speaker diarization (pyannote
+`speaker-diarization-community-1`, CPU) has been verified on that interview:
+
+- Every chunk's label matched the actual speaker. The host's questions became
+  `SPEAKER_00` and the guest's answers `SPEAKER_01`.
+- 99.9% of words overlapped a diarized interval by at least half their
+  duration.
+- Speaker-aware chunking split three previously mixed host/guest chunks at the
+  handover, giving 59 chunks instead of 57.
+
+Diarization needs an `HF_TOKEN` with access to the gated model; without one,
+speakers stay `UNKNOWN`. The lightweight `.venv` remains usable independently.
 
 This is a **working, production-oriented local demonstration**, not a claim
 of audited production readiness, benchmarked recognition accuracy, or a
@@ -74,8 +84,8 @@ ML backends installed:
 .\.venv-ml\Scripts\python.exe app.py
 ```
 
-Use the neural-embedding checkbox followed by **Re-index current recording**
-to test real MiniLM + CLAP on the bundled recording. The initial
+Tick **Neural embeddings** and click **Re-index with current setting** to
+test real MiniLM + CLAP on the bundled recording. The initial
 **Load Pre-indexed Demo Audio** button intentionally stays instantaneous and
 offline in either environment.
 
@@ -94,7 +104,8 @@ Python **3.11** is recommended for optional speech-model compatibility.
 The offline application was tested on Windows with Python 3.11.15 and 3.14.5
 and Gradio 5.50.0. CI (`.github/workflows/ci.yml`) runs lint, type checks,
 tests, and the retrieval evaluation on Ubuntu and Windows with Python 3.11
-and 3.12. Gradio is constrained to 5.x because 6.x changes
+through 3.14. WhisperX (uploads) requires Python **3.10–3.13**; the neural
+embedding stack alone also runs on 3.14. Gradio is constrained to 5.x because 6.x changes
 several UI APIs.
 
 The first dependency installation needs internet access. The bundled demo
@@ -103,32 +114,37 @@ fonts, binds only to loopback, and never creates a public Gradio sharing tunnel.
 
 ## Presentation walkthrough
 
-1. In **Ingest & index**, click **Load Pre-indexed Demo Audio**.
-2. See the two speaker labels, 13 chunks, source waveform, and timeline.
-   Loading the index took approximately **0.20 seconds** in a browser run;
-   timings depend on hardware and cache state.
-3. Open **Search & listen**.
-4. Search **heated argument about interest rates**.
-5. The top example result is `SPEAKER_01`, from **00:15.545 to 00:26.420**.
+1. In **Ingest & index**, click **Load Pre-indexed Demo Audio** in the demo card.
+2. The app opens **Search & listen** automatically. The summary row shows the
+   episode, two speaker labels, 13 retrievable moments, and the load time
+   (about 0.1–0.2 seconds here, depending on hardware and cache state).
+3. Search **heated argument about interest rates**.
+4. The top example result is `SPEAKER_01`, from **00:15.545 to 00:26.420**.
    Its actual playable excerpt is **10.875 seconds**, not the whole podcast.
-6. Move `alpha` toward 1 for transcript relevance or toward 0 for audio cues.
-   Click **Find moments** to apply updated weights and filters.
-7. Filter `SPEAKER_00` to retrieve only that speaker's chunks.
-8. Try:
+5. Move `alpha` toward 1 for transcript relevance or toward 0 for audio cues.
+   Click **Find moments** to apply updated weights and filters. The slider
+   resets to 0.65 for offline indexes and 0.9 for neural ones when an index loads.
+6. Filter `SPEAKER_00` to retrieve only that speaker's chunks. Under
+   **Ranking method & evidence filters**, switch the text scorer to BM25 or the
+   fusion to z-score / RRF.
+7. Try:
    - `speaker laughing about valuation`
    - `calm explanation of monetary policy`
    - `renewable energy and battery storage`
-9. Download the provenance manifest from the first tab.
+8. Back in **Ingest & index**, open **Speaker timeline & provenance** to see
+   every indexed turn and download the provenance manifest.
 
 Use **Local backend readiness** to inspect installed prerequisites without
-downloading weights or displaying tokens. **Re-index current recording** uses
-the embedding checkbox and retains the existing words and speaker labels;
+downloading weights or displaying tokens. **Re-index with current setting**
+uses the embedding checkbox and retains the existing words and speaker labels;
 this allows the bundled recording to exercise real neural embeddings without
 rerunning ASR. **Clear workspace** removes the active index and its owned
-source/snippet files, resets results, and clears the upload field. Gradio's
+source/snippet files, resets results, clears the upload field, and returns to
+the ingest tab. **Add to collection** keeps the collection's current embedding
+mode, so adding an episode never silently turns a neural index offline. Gradio's
 separate media cache remains subject to its expiry policy.
 
-Results display speaker, transcript with escaped query highlights, start/end
+Up to 10 results display speaker (color-coded per label), transcript with escaped query highlights, start/end
 timestamps, combined relevance, component cosines, alignment quality,
 speaker-overlap evidence, timing method, and source SHA-256.
 
@@ -165,10 +181,12 @@ AudioSleuth/
 |-- tools/
 |   |-- synthesize_demo.ps1   # Optional offline Windows TTS regeneration
 |   |-- build_demo.py         # Audio/manifest/index assembly
-|   `-- check_backends.py     # Real-model smoke tests, never fallback successes
+|   |-- check_backends.py     # Real-model smoke tests, never fallback successes
+|   `-- fetch_eval_audio.py   # Download + verify the real evaluation excerpt
 |-- evaluation/
 |   |-- metrics.py            # P@k, R@k, MRR, nDCG@k, MAP over time-span qrels
 |   |-- qrels_demo.json       # 20 judged queries: lexical, paraphrase, tone
+|   |-- qrels_nasa.json       # 16 judged queries on a real NASA interview excerpt
 |   `-- run_eval.py           # Config-grid evaluation CLI
 `-- tests/
     |-- conftest.py
@@ -416,15 +434,20 @@ For diarization:
 
 1. Accept the model's conditions at
    [pyannote/speaker-diarization-community-1](https://huggingface.co/pyannote/speaker-diarization-community-1).
-2. Create an appropriately scoped Hugging Face read token.
-3. Set it in the process environment; never commit it:
+2. Create a **Read** token at <https://huggingface.co/settings/tokens>.
+3. Store it as an environment variable. Never commit it, paste it into a chat,
+   or write it into a project file.
 
 ```bash
+# Linux / macOS: add to ~/.bashrc or ~/.zshrc to persist, then open a new shell
 export HF_TOKEN="your-read-token"
 python app.py
 ```
 
 ```powershell
+# Windows: persists for new terminals (run in your own terminal, then reopen it)
+setx HF_TOKEN "your-read-token"
+# Or only for the current session:
 $env:HF_TOKEN = "your-read-token"
 python app.py
 ```
@@ -473,7 +496,9 @@ an unrelated uploaded file. Such a fallback would fabricate provenance.
 python -m evaluation.run_eval              # offline backends
 python -m evaluation.run_eval --per-query  # add per-query tables
 python -m evaluation.run_eval --neural     # also MiniLM + CLAP (needs .venv-ml)
-python -m evaluation.run_eval --audio talk.wav --qrels my_qrels.json
+# Multi-episode: demo + your recording(s), judged by merged qrels files
+python -m evaluation.run_eval --audio ep2.wav --qrels evaluation/qrels_demo.json --qrels ep2.json
+python -m evaluation.run_eval --no-demo --audio ep2.wav --qrels ep2.json
 ```
 
 Relevance judgments are **time spans** (seconds, graded 1 or 2), not chunk
@@ -482,6 +507,14 @@ relevant when it overlaps a judged span by at least half of the shorter
 interval. Each span is credited once, so duplicate hits cannot inflate
 scores. `evaluation/qrels_demo.json` holds 20 queries in three groups:
 lexical (shared words), paraphrase (no shared content words), and tone.
+
+Every recording is indexed into one shared collection. Spans are tied to an
+episode by a SHA-256 prefix: a file-level `"source_sha256_prefix"` applies to
+all of its spans, and a span's own `"source"` overrides it. A span from one
+episode therefore cannot be credited by the same time range in another. If a
+qrels file names an episode that was not indexed, the run stops instead of
+silently scoring those queries as zero. A recording's hash is shown in the
+app's Episode filter and in its provenance manifest.
 
 Offline results on the bundled demo (13 chunks, k=5):
 
@@ -526,6 +559,52 @@ What the neural run shows:
 - The evaluation set is small (20 queries, 13 chunks), so read these as
   directions, not firm numbers.
 
+### Real-recording evaluation (demo + NASA interview)
+
+The second corpus is real two-person speech: a 12-minute excerpt of NASA's
+*Houston We Have a Podcast*, episode 424 "AI at NASA". Credit: NASA Johnson
+Space Center; NASA media is used here for education, with no endorsement
+implied. The audio is never committed. `tools/fetch_eval_audio.py` downloads
+the episode, checks its SHA-256, and writes the excerpt to the git-ignored
+`evaluation/data/`. `evaluation/qrels_nasa.json` holds 16 judged queries:
+8 lexical and 8 paraphrase. It has no tone queries, because the interview is
+uniformly calm. The judgments were drafted with AI assistance from a WhisperX
+transcript and should be reviewed by a person before being reported.
+
+```bash
+python tools/fetch_eval_audio.py   # once; ~25 MB download
+python -m evaluation.run_eval --neural --audio evaluation/data/nasa_ai_at_nasa.wav \
+  --qrels evaluation/qrels_demo.json --qrels evaluation/qrels_nasa.json
+```
+
+The whole run uses one shared index: 70 chunks, of which WhisperX `small` on
+CPU produced 57 from the excerpt, and 36 queries. MRR on Python 3.12:
+
+| Config | alpha | demo lexical | demo paraphrase | demo tone | NASA lexical | NASA paraphrase | all |
+|---|---|---|---|---|---|---|---|
+| TF-IDF only | 1.00 | 1.000 | 0.048 | 0.667 | 1.000 | 0.448 | 0.637 |
+| BM25 only | 1.00 | 1.000 | 0.143 | 0.667 | 1.000 | 0.450 | 0.656 |
+| MiniLM only | 1.00 | 1.000 | **0.690** | 0.298 | 1.000 | **0.567** | **0.726** |
+| MiniLM + CLAP, linear | 0.65 | 0.929 | 0.687 | 0.348 | 1.000 | 0.479 | 0.701 |
+| MiniLM + CLAP, RRF | 0.65 | 0.569 | 0.548 | 0.117 | 0.768 | 0.271 | 0.468 |
+| BM25 + CLAP, z-score | 0.65 | 1.000 | 0.250 | **0.750** | 1.000 | 0.451 | 0.691 |
+
+What the larger, real corpus adds:
+- **Real paraphrases are harder.** On the NASA episode, MiniLM raises
+  paraphrase MRR from 0.448 (TF-IDF) to 0.567. That is a clear gain, but far
+  from the perfect score it reached on the scripted demo alone.
+- **Distractors separate the methods.** With 57 more chunks in the index,
+  TF-IDF's demo-paraphrase MRR falls from 0.228 to 0.048, while MiniLM holds
+  0.690.
+- **RRF is a poor fit for CLAP.** CLAP produces a full ranking for every
+  query, so rank fusion gives that weak signal full weight. Score-level fusion
+  (linear or z-score) degrades far less.
+- **Lexical queries are solved** by every text method on both episodes.
+- **The neural default α=0.9 holds up.** Sweeping α with linear fusion on this
+  corpus gives MRR 0.701 at 0.65, 0.719 at 0.8, **0.729 at 0.9**, 0.724 at 0.95,
+  and 0.726 at 1.0. The app therefore resets the slider to 0.9 for neural
+  indexes and keeps 0.65 offline, where MRR is flat across α.
+
 ## Validation
 
 ```bash
@@ -558,19 +637,17 @@ The delivered test suite exercises:
 - Multi-episode collections: shared index, duplicate rejection, and manifests.
 - Hand-computed IR metrics, span judging, and an end-to-end demo evaluation.
 
-Current result: **74 tests passed**, and mypy, Ruff lint, and Ruff format are
-clean (Windows, Python 3.14.5). The counts below are from the original
-delivery.
+- Upstream API changes (AttributeError) degrading to visible offline fallbacks.
+- Episode-aware qrels, merged qrels files, and unindexed-episode detection.
 
-Verified result: **55 tests passed**, mypy passed for all seven runtime Python
-modules, and Ruff lint/format checks passed. Pylance reported no syntax errors
-in the dashboard entry point. WAV and MP3 fixtures both ran on the test machine.
+Current result: **82 tests passed** (also on Python 3.12 with the pinned ML stack). Mypy (ten modules), Ruff lint, and Ruff
+format are clean on Windows with Python 3.14.5.
 
-Browser verification additionally exercised demo loading, search, speaker
-filtering, and successful playback of the top 10.875-second excerpt.
-HTTP client verification downloaded that exact-duration clip and confirmed
-that a second session could not search the first session's index.
-Updated HTTP checks also exercised re-indexing, clearing, and empty-evidence queries.
+Browser verification (Playwright driving Edge) loaded the demo, checked the
+automatic switch to **Search & listen**, searched, and captured light and dark
+themes at 1440 px and 390 px. No width showed horizontal overflow. Earlier
+HTTP-client checks confirmed exact-duration clip downloads and that one session
+cannot search another session's index.
 
 ### Real neural integration results
 

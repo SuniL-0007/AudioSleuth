@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import math
+from dataclasses import replace
+from pathlib import Path
 
 import pytest
 
@@ -17,6 +20,7 @@ from evaluation.metrics import (
     score_query,
 )
 from evaluation.run_eval import CONFIGS, QRELS, load_qrels, report, run
+from ingestion import load_demo
 from schemas import AudioSleuthError, Chunk
 
 
@@ -101,3 +105,75 @@ def test_neural_run_refuses_silent_fallback(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(builtins, "__import__", blocked)
     with pytest.raises(AudioSleuthError, match="fell back"):
         run(neural=True)
+
+
+def test_span_source_restricts_matches_to_one_episode() -> None:
+    episode_a = replace(chunk(0, 10), source_sha256="a" * 64)
+    episode_b = replace(chunk(0, 10), source_sha256="b" * 64)
+    assert matches(episode_a, Span(0, 10, 2, source="aaaa"))
+    assert not matches(episode_b, Span(0, 10, 2, source="aaaa"))
+    assert matches(episode_b, Span(0, 10, 2))  # No source: any episode's time range.
+
+
+def test_multi_episode_evaluation_with_merged_qrels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Demo qrels plus a second episode's qrels evaluate over one shared index."""
+    import service
+    from tests.test_collection import second_episode
+
+    monkeypatch.setattr(service, "ingest_upload", lambda _: second_episode(load_demo()))
+    extra = tmp_path / "second.json"
+    extra.write_text(
+        json.dumps(
+            {
+                "source_sha256_prefix": "aaaaaaaa",
+                "queries": [
+                    {
+                        "id": "ep2-01",
+                        "type": "lexical",
+                        "query": "monetary policy",
+                        "spans": [{"start": 38.55, "end": 44.87, "grade": 2}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    results = run(qrels=[QRELS, extra], audio=[Path("second.wav")])
+    text_only = next(r for r in results if r["label"] == "text only")
+    second = next(row for row in text_only["queries"] if row["id"] == "ep2-01")
+    assert len(text_only["queries"]) == len(load_qrels(QRELS)) + 1
+    assert second["R@5"] == 1.0  # Found in episode two, not credited from the demo's copy.
+
+
+def test_qrels_for_unindexed_episode_fail_loudly(tmp_path: Path) -> None:
+    orphan = tmp_path / "orphan.json"
+    orphan.write_text(
+        json.dumps(
+            {
+                "source_sha256_prefix": "ffffffff",
+                "queries": [
+                    {
+                        "id": "x",
+                        "type": "lexical",
+                        "query": "q",
+                        "spans": [{"start": 0, "end": 1, "grade": 2}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(AudioSleuthError, match="not indexed"):
+        run(qrels=[orphan])
+
+
+def test_real_recording_qrels_are_valid_and_episode_scoped() -> None:
+    """The NASA qrels parse, merge with the demo's, and stay tied to their excerpt."""
+    nasa = QRELS.with_name("qrels_nasa.json")
+    queries = load_qrels(QRELS, nasa)
+    real = [query for query in queries if query["id"].startswith("nasa-")]
+    assert len(real) == 16
+    assert {span.source for query in real for span in query["spans"]} == {"aaf9c9041c1a"}
+    assert all(span.end <= 720 for query in real for span in query["spans"])  # 12-min excerpt.

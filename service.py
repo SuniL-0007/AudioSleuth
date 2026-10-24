@@ -120,10 +120,21 @@ def create_collection(*, upload: Path | None = None, neural: bool = False) -> Co
     return _build_collection([recording], neural=neural, precomputed=upload is None)
 
 
+def is_neural(index: DualIndex) -> bool:
+    """True when either modality was built with a neural encoder."""
+    return index.text_backend == "sentence-transformers" or index.audio_backend == "CLAP"
+
+
 def add_to_collection(
-    current: Collection, *, upload: Path | None = None, neural: bool = False
+    current: Collection, *, upload: Path | None = None, neural: bool | None = None
 ) -> Collection:
-    """Add an episode (or the demo) and rebuild one index; the old collection is untouched."""
+    """Add an episode (or the demo) and rebuild one index; the old collection is untouched.
+
+    neural=None keeps the collection's current embedding mode, so adding an episode
+    never silently downgrades a neural index to the offline encoders.
+    """
+    if neural is None:
+        neural = is_neural(current.index)
     recording = load_demo() if upload is None else ingest_upload(upload)
     if any(r.source_sha256 == recording.source_sha256 for r in current.recordings):
         raise AudioSleuthError(f"{recording.source_name} is already in this collection.")
