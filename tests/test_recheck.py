@@ -142,14 +142,14 @@ def test_sentence_embeddings_cover_every_token_and_weight_the_tail(
         def num_special_tokens_to_add(self, pair: bool) -> int:
             return 2
 
-        def encode(self, text: str, **kwargs: Any) -> list[int]:
-            return [int(token) for token in text.split()]
-
-        def prepare_for_model(self, tokens: list[int], **kwargs: Any) -> dict[str, list[int]]:
-            seen.append(tokens)
-            return {"input_ids": tokens}
+        def encode(self, text: str, *, add_special_tokens: bool, **kwargs: Any) -> list[int]:
+            tokens = [0 if token == "probe" else int(token) for token in text.split()]
+            return [100, *tokens, 101] if add_special_tokens else tokens
 
         def pad(self, windows: list[dict[str, list[int]]], **kwargs: Any) -> dict[str, Tensor]:
+            for window in windows:
+                assert window["input_ids"][0] == 100 and window["input_ids"][-1] == 101
+                seen.append(window["input_ids"][1:-1])
             rows = [[int(9 not in w["input_ids"]), int(9 in w["input_ids"])] for w in windows]
             return {"input_ids": Tensor(np.array(rows, dtype=np.float32))}
 

@@ -59,7 +59,7 @@ Open **http://127.0.0.1:7860**.
 The delivered environment already exists, so on this machine:
 
 ```powershell
-cd C:\dev\AudioSleuth
+cd <your clone of AudioSleuth>
 .\.venv\Scripts\python.exe app.py
 ```
 
@@ -91,9 +91,10 @@ python app.py
 
 The source targets Python **3.10+**; pip selects compatible dependency releases.
 Python **3.11** is recommended for optional speech-model compatibility.
-The offline application was tested on Windows with Python 3.11.15 and Gradio
-5.50.0. Linux/macOS/WSL are supported by the portable code paths but were not
-separately tested here. Gradio is constrained to 5.x because 6.x changes
+The offline application was tested on Windows with Python 3.11.15 and 3.14.5
+and Gradio 5.50.0. CI (`.github/workflows/ci.yml`) runs lint, type checks,
+tests, and the retrieval evaluation on Ubuntu and Windows with Python 3.11
+and 3.12. Gradio is constrained to 5.x because 6.x changes
 several UI APIs.
 
 The first dependency installation needs internet access. The bundled demo
@@ -145,8 +146,9 @@ AudioSleuth/
 |-- ingestion.py              # WAV/MP3 decoding, WhisperX, speaker assignment
 |-- chunking.py               # Dynamic turns and exact audio snippets
 |-- indexing.py               # Neural/fallback encoders and NumPy dual index
-|-- retrieval.py              # Hybrid scoring and metadata filters
-|-- service.py                # Atomic session-local collection lifecycle
+|-- bm25.py                   # Sparse Okapi BM25 text scorer
+|-- retrieval.py              # Linear / z-score / RRF fusion and metadata filters
+|-- service.py                # Atomic multi-episode collection lifecycle
 |-- schemas.py                # Typed words, intervals, chunks, search hits
 |-- requirements.txt          # Lightweight runtime
 |-- requirements-ml.txt       # Optional neural stack
@@ -164,11 +166,18 @@ AudioSleuth/
 |   |-- synthesize_demo.ps1   # Optional offline Windows TTS regeneration
 |   |-- build_demo.py         # Audio/manifest/index assembly
 |   `-- check_backends.py     # Real-model smoke tests, never fallback successes
+|-- evaluation/
+|   |-- metrics.py            # P@k, R@k, MRR, nDCG@k, MAP over time-span qrels
+|   |-- qrels_demo.json       # 20 judged queries: lexical, paraphrase, tone
+|   `-- run_eval.py           # Config-grid evaluation CLI
 `-- tests/
     |-- conftest.py
     |-- test_ingestion.py
     |-- test_chunking.py
     |-- test_retrieval.py
+    |-- test_fusion.py
+    |-- test_collection.py
+    |-- test_metrics.py
     |-- test_app.py
     `-- test_recheck.py
 ```
@@ -318,6 +327,31 @@ All vectors are L2-normalized:
   original encoder becomes unavailable, the app asks for re-indexing.
 - Ties are stable by source start time.
 
+**Text scorer.** Besides the index's text vectors (TF-IDF or MiniLM), every
+index carries an Okapi BM25 scorer (`k1=1.5`, `b=0.75`, English stopwords
+removed), built from the chunk transcripts in milliseconds.
+
+**Fusion.** The formula above is the default `linear` fusion. Two alternatives
+avoid mixing incomparable score scales:
+
+- `zscore`: each modality is standardized over the filtered candidates, then
+  weighted by `alpha`.
+- `rrf`: weighted reciprocal rank fusion,
+  `alpha/(60+rank_text) + (1-alpha)/(60+rank_audio)`.
+
+In both, a modality with no query evidence contributes nothing, so it cannot
+reorder the other modality's ranking. Evidence is judged among the filtered
+candidates, so a term that occurs only in another episode returns no matches
+rather than zero-score chunks. BM25 scores are unbounded, so BM25 with
+`0<alpha<1` requires `zscore` or `rrf`. Minimum hybrid relevance applies only
+to `linear`.
+
+**Episodes.** **Add to collection** indexes another recording next to the
+current ones in one shared index, so IDF statistics and normalization cover
+the whole corpus. The **Episode** filter (by source SHA-256) applies before
+ranking, like the speaker filter. Duplicate recordings are rejected, and the
+provenance manifest lists every source.
+
 ### 5. What "exact millisecond provenance" means
 
 At 16 kHz, one millisecond contains exactly 16 samples. The snippet saved for
@@ -433,6 +467,65 @@ your uploaded audio to a hosted transcription API.
 The app deliberately does **not** attach the sample podcast transcript to
 an unrelated uploaded file. Such a fallback would fabricate provenance.
 
+## Retrieval evaluation
+
+```bash
+python -m evaluation.run_eval              # offline backends
+python -m evaluation.run_eval --per-query  # add per-query tables
+python -m evaluation.run_eval --neural     # also MiniLM + CLAP (needs .venv-ml)
+python -m evaluation.run_eval --audio talk.wav --qrels my_qrels.json
+```
+
+Relevance judgments are **time spans** (seconds, graded 1 or 2), not chunk
+IDs, so they stay valid when the chunking changes. A retrieved chunk is
+relevant when it overlaps a judged span by at least half of the shorter
+interval. Each span is credited once, so duplicate hits cannot inflate
+scores. `evaluation/qrels_demo.json` holds 20 queries in three groups:
+lexical (shared words), paraphrase (no shared content words), and tone.
+
+Offline results on the bundled demo (13 chunks, k=5):
+
+| Config | alpha | MRR all | MRR lexical | MRR paraphrase | MRR tone | nDCG@5 all |
+|---|---|---|---|---|---|---|
+| TF-IDF only | 1.00 | 0.630 | 1.000 | 0.228 | 0.667 | 0.562 |
+| BM25 only | 1.00 | 0.600 | 1.000 | 0.143 | 0.667 | 0.531 |
+| Audio descriptors only | 0.00 | 0.202 | 0.000 | 0.000 | 0.672 | 0.181 |
+| TF-IDF + audio, linear | 0.65 | 0.690 | 1.000 | 0.228 | 0.867 | 0.633 |
+| TF-IDF + audio, RRF | 0.65 | 0.690 | 1.000 | 0.228 | 0.867 | 0.622 |
+| BM25 + audio, z-score | 0.65 | 0.660 | 1.000 | 0.143 | 0.867 | 0.602 |
+
+How to read the table:
+- Lexical methods solve lexical queries and fail on paraphrases. That gap is
+  what neural text embeddings (`--neural`) should close.
+- The audio descriptors help only on tone queries.
+- On a 13-chunk corpus, the fusion methods barely differ. A larger
+  multi-episode corpus is needed to separate them.
+- Tone results flatter the descriptors, because the demo's two synthetic
+  voices also differ in gain.
+
+Neural results (`--neural`: MiniLM + CLAP, CPU, transformers 5.20). MRR:
+
+| Config | alpha | all | lexical | paraphrase | tone | nDCG@5 all |
+|---|---|---|---|---|---|---|
+| MiniLM only | 1.00 | **0.854** | 1.000 | **1.000** | 0.514 | **0.818** |
+| CLAP audio only | 0.00 | 0.352 | 0.371 | 0.417 | 0.254 | 0.238 |
+| MiniLM + CLAP, linear | 0.65 | 0.782 | 0.929 | 0.833 | 0.552 | 0.772 |
+| MiniLM + CLAP, z-score | 0.65 | 0.786 | 0.905 | 0.893 | 0.524 | 0.785 |
+| MiniLM + CLAP, RRF | 0.65 | 0.624 | 0.738 | 0.726 | 0.371 | 0.670 |
+| BM25 + CLAP, z-score | 0.65 | 0.792 | 1.000 | 0.535 | **0.850** | 0.664 |
+
+What the neural run shows:
+- MiniLM closes the paraphrase gap: TF-IDF's paraphrase MRR goes from 0.228
+  to 1.000. All seven paraphrase queries rank a correct moment first,
+  including five that TF-IDF missed or ranked low.
+- CLAP adds little here. It is weaker on tone queries than the
+  nine hand-made descriptors (0.254 vs 0.672 MRR), and mixing it in lowers
+  MiniLM's overall score. CLAP is a general audio-event model and was not
+  trained on speech prosody. On this synthetic speech it acts as noise more
+  than as a tone signal.
+- The evaluation set is small (20 queries, 13 chunks), so read these as
+  directions, not firm numbers.
+
 ## Validation
 
 ```bash
@@ -461,6 +554,13 @@ The delivered test suite exercises:
 - Zero-weight encoder independence and unsupported-query empty results.
 - Full-token neural text pooling and the Transformers CLAP adapter contract.
 - Corrupt IDF rejection, re-indexing, and explicit workspace clearing.
+- Hand-computed BM25 scores, RRF and z-score semantics, and the episode filter.
+- Multi-episode collections: shared index, duplicate rejection, and manifests.
+- Hand-computed IR metrics, span judging, and an end-to-end demo evaluation.
+
+Current result: **74 tests passed**, and mypy, Ruff lint, and Ruff format are
+clean (Windows, Python 3.14.5). The counts below are from the original
+delivery.
 
 Verified result: **55 tests passed**, mypy passed for all seven runtime Python
 modules, and Ruff lint/format checks passed. Pylance reported no syntax errors

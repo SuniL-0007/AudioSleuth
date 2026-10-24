@@ -19,6 +19,7 @@ from httpx import HTTPError
 from scipy.signal import resample_poly
 from sklearn.feature_extraction.text import TfidfVectorizer
 
+from bm25 import BM25
 from schemas import SAMPLE_RATE, AudioSleuthError, Chunk, Samples, Vectors
 
 os.environ.setdefault("HF_HUB_DISABLE_TELEMETRY", "1")
@@ -46,7 +47,8 @@ def normalize(matrix: Vectors) -> Vectors:
     values = np.asarray(matrix, dtype=np.float32)
     if values.ndim != 2 or not np.isfinite(values).all():
         raise AudioSleuthError("An encoder produced malformed or nonfinite vectors.")
-    return values / np.maximum(np.linalg.norm(values, axis=1, keepdims=True), 1e-12)
+    norms = np.maximum(np.linalg.norm(values, axis=1, keepdims=True), 1e-12)
+    return np.asarray(values / norms, dtype=np.float32)
 
 
 @lru_cache(maxsize=1)
@@ -62,6 +64,14 @@ def _sentence_embeddings(texts: list[str]) -> Vectors:
     budget = int(model.max_seq_length) - tokenizer.num_special_tokens_to_add(pair=False)
     if budget <= 0:
         raise AudioSleuthError("The sentence model has no usable token capacity.")
+    # Learn the special-token wrapping from a probe encoding: prepare_for_model and
+    # build_inputs_with_special_tokens were removed in transformers 5.
+    wrapped = tokenizer.encode("probe", add_special_tokens=True)
+    bare = tokenizer.encode("probe", add_special_tokens=False)
+    cut = next((i for i in range(len(wrapped)) if wrapped[i : i + len(bare)] == bare), None)
+    if cut is None:
+        raise AudioSleuthError("The sentence tokenizer's special tokens could not be located.")
+    prefix, suffix = wrapped[:cut], wrapped[cut + len(bare) :]
     windows: list[Any] = []
     owners: list[int] = []
     lengths: list[int] = []
@@ -71,11 +81,8 @@ def _sentence_embeddings(texts: list[str]) -> Vectors:
             raise AudioSleuthError("A transcript contains no encodable text.")
         for start in range(0, len(tokens), budget):
             window = tokens[start : start + budget]
-            windows.append(
-                tokenizer.prepare_for_model(
-                    window, add_special_tokens=True, truncation=False, return_attention_mask=True
-                )
-            )
+            ids = prefix + window + suffix
+            windows.append({"input_ids": ids, "attention_mask": [1] * len(ids)})
             owners.append(owner)
             lengths.append(len(window))
     torch = importlib.import_module("torch")
@@ -99,6 +106,12 @@ def _sentence_embeddings(texts: list[str]) -> Vectors:
     return normalize(np.asarray(pooled, dtype=np.float32))
 
 
+def _projected(result: Any) -> Vectors:
+    """Transformers 4 returns the projected tensor; 5 wraps it as pooler_output."""
+    tensor = getattr(result, "pooler_output", result)
+    return np.asarray(tensor.detach().cpu().numpy(), dtype=np.float32)
+
+
 @dataclass
 class ClapEncoder:
     """LAION weights through Transformers, compatible with WhisperX's NumPy 2 stack."""
@@ -112,7 +125,7 @@ class ClapEncoder:
         torch = importlib.import_module("torch")
         with torch.inference_mode():
             result = self.model.get_audio_features(**inputs)
-        return np.asarray(result.detach().cpu().numpy(), dtype=np.float32)
+        return _projected(result)
 
     def text(self, texts: list[str]) -> Vectors:
         """Encode tone descriptions in the same learned projection space."""
@@ -120,7 +133,7 @@ class ClapEncoder:
         torch = importlib.import_module("torch")
         with torch.inference_mode():
             result = self.model.get_text_features(**inputs)
-        return np.asarray(result.detach().cpu().numpy(), dtype=np.float32)
+        return _projected(result)
 
 
 @lru_cache(maxsize=1)
@@ -188,7 +201,8 @@ def _clap_audio(samples: Samples) -> Vectors:
         audio_48k = np.asarray(resample_poly(window, 3, 1), dtype=np.float32)
         values = model.audio(audio_48k)
         embeddings.append(normalize(np.asarray(values, dtype=np.float32))[0])
-    return normalize(np.mean(np.stack(embeddings), axis=0, keepdims=True))[0]
+    pooled = np.mean(np.stack(embeddings), axis=0, keepdims=True)
+    return normalize(np.asarray(pooled, dtype=np.float32))[0]
 
 
 @dataclass
@@ -202,6 +216,7 @@ class DualIndex:
     audio_backend: str
     vectorizer: TfidfVectorizer | None = None
     notices: list[str] = field(default_factory=list)
+    bm25: BM25 | None = None
 
     def encode_query(
         self, query: str, *, include_text: bool = True, include_audio: bool = True
@@ -309,6 +324,7 @@ def build_index(chunks: list[Chunk], *, neural: bool = False) -> DualIndex:
         audio_backend,
         vectorizer,
         notices,
+        BM25(transcripts),
     )
 
 
@@ -369,6 +385,7 @@ def load_demo_index(chunks: list[Chunk], directory: Path) -> DualIndex:
             manifest["audio_backend"],
             vectorizer,
             ["Loaded bundled precomputed vectors: lexical TF-IDF + audio signal descriptors."],
+            BM25([chunk.transcript for chunk in chunks]),
         )
     except (OSError, KeyError, ValueError) as exc:
         raise AudioSleuthError(

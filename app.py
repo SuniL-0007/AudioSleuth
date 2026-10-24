@@ -20,10 +20,31 @@ import gradio as gr  # noqa: E402
 from indexing import acoustic_query  # noqa: E402
 from retrieval import search  # noqa: E402
 from schemas import AudioSleuthError, SearchHit  # noqa: E402
-from service import Collection, create_collection, dispose, reindex_collection  # noqa: E402
+from service import (  # noqa: E402
+    Collection,
+    add_to_collection,
+    create_collection,
+    dispose,
+    reindex_collection,
+)
 
 ROOT = Path(__file__).parent
 MAX_RESULTS = 5
+ALL_EPISODES = "All episodes"
+SCORERS = [
+    ("Index vectors (TF-IDF or MiniLM)", "vectors"),
+    ("BM25 (Okapi, stopwords removed)", "bm25"),
+]
+FUSIONS = [
+    ("Linear cosine (original)", "linear"),
+    ("Z-score normalized", "zscore"),
+    ("Reciprocal rank fusion", "rrf"),
+]
+FUSION_LABELS = {
+    "linear": "hybrid cosine relevance",
+    "zscore": "z-score fusion",
+    "rrf": "reciprocal rank fusion",
+}
 
 
 def backend_status() -> str:
@@ -74,10 +95,19 @@ def highlight(transcript: str, query: str) -> str:
     return "".join(result)
 
 
-def hit_card(hit: SearchHit, query: str, rank: int, *, alpha: float = 0.65) -> str:
+def hit_card(
+    hit: SearchHit,
+    query: str,
+    rank: int,
+    *,
+    alpha: float = 0.65,
+    scorer: str = "vectors",
+    episode: str = "",
+) -> str:
     """Display relevance separately from timing confidence and speaker overlap."""
     chunk = hit.chunk
     color = "mint" if chunk.speaker_id.endswith("00") else "violet"
+    text_label = "Text BM25" if scorer == "bm25" else "Text cosine"
     text_score = f"{hit.text_score:.3f}" if alpha > 0 else "not evaluated"
     audio_score = f"{hit.audio_score:.3f}" if alpha < 1 else "not evaluated"
     return f"""
@@ -90,13 +120,14 @@ def hit_card(hit: SearchHit, query: str, rank: int, *, alpha: float = 0.65) -> s
       </div>
       <p class="quote">{highlight(chunk.transcript, query)}</p>
       <div class="hit-meta">
-        <span>Text cosine <b>{text_score}</b></span>
+        <span>{text_label} <b>{text_score}</b></span>
         <span>Audio cosine <b>{audio_score}</b></span>
         <span>Alignment quality <b>{chunk.confidence:.2f}</b></span>
         <span>Speaker overlap <b>{chunk.speaker_confidence:.2f}</b></span>
         <span>{html.escape(chunk.timing)} timing</span>
       </div>
-      <div class="provenance">SOURCE SHA-256 {chunk.source_sha256[:16]}...
+      <div class="provenance">{html.escape(episode)}
+        &nbsp; / &nbsp; SOURCE SHA-256 {chunk.source_sha256[:16]}...
         &nbsp; / &nbsp; {html.escape(chunk.chunk_id)}
         &nbsp; / &nbsp; {(chunk.end_ms - chunk.start_ms) / 1000:.3f}s clip</div>
     </article>"""
@@ -109,22 +140,29 @@ def _empty_results() -> list[Any]:
 
 
 def _collection_outputs(collection: Collection, elapsed: float) -> list[Any]:
-    recording, index = collection.recording, collection.index
+    recordings, index = collection.recordings, collection.index
     speakers = sorted({chunk.speaker_id for chunk in index.chunks})
+    names = {sha: name for name, sha in collection.episodes()}
+    minutes = sum(recording.duration for recording in recordings) / 60
+    plural = "s" if len(recordings) != 1 else ""
     stats = f"""
     <div class="metrics">
-      <div><strong>{recording.duration / 60:.1f}<small> min</small></strong>
-      <span>Source audio</span></div>
+      <div><strong>{minutes:.1f}<small> min</small></strong>
+      <span>{len(recordings)} episode{plural}</span></div>
       <div><strong>{len(speakers)}</strong><span>Speaker labels</span></div>
       <div><strong>{len(index.chunks)}</strong><span>Retrievable moments</span></div>
       <div><strong>{elapsed:.2f}<small> s</small></strong><span>Index load / build</span></div>
     </div>"""
     notices = "".join(
-        f"<li>{html.escape(notice)}</li>" for notice in recording.notices + index.notices
+        f"<li>{html.escape(notice)}</li>"
+        for notice in [n for r in recordings for n in r.notices] + index.notices
+    )
+    sources = "<br>".join(
+        f"{html.escape(r.source_name)} &middot; {html.escape(r.mode)}" for r in recordings
     )
     status = f"""
-    <div class="status-ready"><b>INDEX READY</b> &nbsp; {html.escape(recording.source_name)}
-    <p>{html.escape(recording.mode)} &middot; {html.escape(index.text_backend)}
+    <div class="status-ready"><b>INDEX READY</b> &nbsp; {len(recordings)} episode{plural}
+    <p>{sources}<br>{html.escape(index.text_backend)}
     &middot; {html.escape(index.audio_backend)}</p>
     <details open><summary>Evidence &amp; limitations</summary><ul>{notices}</ul>
     <p>Times address exact source slices; alignment accuracy is not guaranteed to a millisecond.
@@ -132,6 +170,7 @@ def _collection_outputs(collection: Collection, elapsed: float) -> list[Any]:
     </details></div>"""
     table = [
         [
+            names[chunk.source_sha256],
             chunk.speaker_id,
             timestamp(chunk.start_ms),
             timestamp(chunk.end_ms),
@@ -151,6 +190,7 @@ def _collection_outputs(collection: Collection, elapsed: float) -> list[Any]:
         str(collection.manifest_path),
         "<div class='search-summary'>Index ready. Search for a topic, a tone, or both.</div>",
         *_empty_results(),
+        gr.update(choices=[ALL_EPISODES, *collection.episodes()], value=ALL_EPISODES),
     ]
 
 
@@ -173,6 +213,22 @@ def process_callback(upload: str | None, neural: bool, current: Collection | Non
     start = time.perf_counter()
     try:
         collection = create_collection(upload=Path(upload), neural=neural)
+    except AudioSleuthError as exc:
+        raise gr.Error(str(exc)) from exc
+    outputs = _collection_outputs(collection, time.perf_counter() - start)
+    dispose(current)
+    return outputs
+
+
+def add_callback(upload: str | None, neural: bool, current: Collection | None) -> list[Any]:
+    """Grow the session corpus by one episode; adding to nothing starts a new collection."""
+    if current is None:
+        return process_callback(upload, neural, current)
+    if upload is None:
+        raise gr.Error("Choose a WAV or MP3 file to add to the current collection.")
+    start = time.perf_counter()
+    try:
+        collection = add_to_collection(current, upload=Path(upload), neural=neural)
     except AudioSleuthError as exc:
         raise gr.Error(str(exc)) from exc
     outputs = _collection_outputs(collection, time.perf_counter() - start)
@@ -207,6 +263,7 @@ def clear_callback(current: Collection | None) -> list[Any]:
         None,
         "<div class='search-summary'>No active index.</div>",
         *_empty_results(),
+        gr.update(choices=[ALL_EPISODES], value=ALL_EPISODES),
         None,
     ]
 
@@ -218,6 +275,9 @@ def search_callback(
     confidence: float,
     minimum: float,
     collection: Collection | None,
+    episode: str = ALL_EPISODES,
+    scorer: str = "vectors",
+    fusion: str = "linear",
 ) -> list[Any]:
     """Return actual clip files to Gradio Audio, not a full-source seek suggestion."""
     if collection is None:
@@ -229,9 +289,12 @@ def search_callback(
             query,
             alpha=alpha,
             speaker=None if speaker == "All speakers" else speaker,
+            episode=None if episode == ALL_EPISODES else episode,
             min_confidence=confidence,
             min_score=minimum,
             top_k=MAX_RESULTS,
+            text_scorer=scorer,  # type: ignore[arg-type]
+            fusion=fusion,  # type: ignore[arg-type]
         )
     except AudioSleuthError as exc:
         raise gr.Error(str(exc)) from exc
@@ -239,7 +302,8 @@ def search_callback(
     summary = (
         f"<div class='search-summary'><b>{len(hits)} moments found</b> in {took:.1f} ms"
         f" &nbsp; &middot; &nbsp; Text weight {alpha:.0%} / Audio weight {1 - alpha:.0%}"
-        "<br><small>Sorted by hybrid cosine relevance, not a calibrated confidence probability."
+        f"<br><small>Sorted by {FUSION_LABELS.get(fusion, fusion)}, "
+        "not a calibrated confidence probability."
         " Clip players start at 0:00 within each exact source interval.</small></div>"
     )
     if not hits:
@@ -252,6 +316,7 @@ def search_callback(
             "<p>Offline audio search found no supported tone words in this query. "
             "Audio similarity is zero; try loud, calm, excited, or use text weight 1.</p>"
         )
+    names = {sha: name for name, sha in collection.episodes()}
     outputs: list[Any] = [summary]
     for position in range(MAX_RESULTS):
         if position < len(hits):
@@ -259,7 +324,14 @@ def search_callback(
             outputs.extend(
                 (
                     gr.update(visible=True),
-                    hit_card(hit, query, position + 1, alpha=alpha),
+                    hit_card(
+                        hit,
+                        query,
+                        position + 1,
+                        alpha=alpha,
+                        scorer=scorer,
+                        episode=names.get(hit.chunk.source_sha256, ""),
+                    ),
                     hit.chunk.audio_path,
                 )
             )
@@ -318,8 +390,12 @@ def build_app() -> gr.Blocks:
                             label="Use neural text + CLAP embeddings (optional ML installation)",
                             value=False,
                         )
-                        process = gr.Button("Process & Index", variant="primary", size="lg")
+                        with gr.Row():
+                            process = gr.Button("Process & Index", variant="primary", size="lg")
+                            add = gr.Button("Add to collection", variant="secondary", size="lg")
                         gr.Markdown(
+                            "**Process** replaces the collection; **Add** indexes another "
+                            "episode alongside the current ones. "
                             "Uploads require WhisperX. "
                             "Pyannote needs `HF_TOKEN` and model consent. "
                             "Missing diarization leaves **UNKNOWN** speakers, "
@@ -361,8 +437,16 @@ def build_app() -> gr.Blocks:
                 )
                 with gr.Accordion("Diarized speaker timeline & provenance", open=True):
                     timeline = gr.Dataframe(
-                        headers=["Speaker", "Start", "End", "Alignment", "Timing", "Transcript"],
-                        datatype=["str", "str", "str", "number", "str", "str"],
+                        headers=[
+                            "Episode",
+                            "Speaker",
+                            "Start",
+                            "End",
+                            "Alignment",
+                            "Timing",
+                            "Transcript",
+                        ],
+                        datatype=["str", "str", "str", "str", "number", "str", "str"],
                         interactive=False,
                         wrap=True,
                         label="Indexed speaker turns",
@@ -401,16 +485,30 @@ def build_app() -> gr.Blocks:
                     speaker = gr.Dropdown(
                         choices=["All speakers"], value="All speakers", label="Speaker"
                     )
+                    episode = gr.Dropdown(
+                        choices=[ALL_EPISODES], value=ALL_EPISODES, label="Episode"
+                    )
                 with gr.Accordion("Evidence filters & scoring", open=False):
                     with gr.Row():
                         confidence = gr.Slider(
                             0, 1, value=0, step=0.05, label="Minimum alignment quality"
                         )
                         minimum = gr.Slider(
-                            -1, 1, value=0, step=0.05, label="Minimum hybrid relevance"
+                            -1,
+                            1,
+                            value=0,
+                            step=0.05,
+                            label="Minimum hybrid relevance",
+                            info="Applies to linear fusion only",
                         )
+                    with gr.Row():
+                        scorer = gr.Radio(SCORERS, value="vectors", label="Text scorer")
+                        fusion = gr.Radio(FUSIONS, value="linear", label="Score fusion")
                     gr.Markdown(
-                        "`score = alpha * cosine(text) + (1-alpha) * cosine(audio)`\n\n"
+                        "Linear: `alpha * cosine(text) + (1-alpha) * cosine(audio)`. "
+                        "Z-score standardizes each modality over the filtered candidates; "
+                        "RRF sums `weight / (60 + rank)`. BM25 is unbounded, so combining it "
+                        "with audio needs z-score or RRF.\n\n"
                         "Cosines are not probabilities. Offline tone mapping is a heuristic: "
                         "it cannot verify laughter, anger, identity, or psychological state."
                     )
@@ -444,6 +542,7 @@ def build_app() -> gr.Blocks:
             manifest,
             summary,
             *result_outputs,
+            episode,
         ]
         demo.click(
             load_demo_callback,
@@ -458,6 +557,14 @@ def build_app() -> gr.Blocks:
             inputs=[upload, neural, state],
             outputs=index_outputs,
             api_name="process_audio",
+            concurrency_limit=1,
+            concurrency_id="pipeline",
+        )
+        add.click(
+            add_callback,
+            inputs=[upload, neural, state],
+            outputs=index_outputs,
+            api_name="add_audio",
             concurrency_limit=1,
             concurrency_id="pipeline",
         )
@@ -477,7 +584,17 @@ def build_app() -> gr.Blocks:
             concurrency_limit=1,
             concurrency_id="pipeline",
         )
-        search_inputs = [query, alpha, speaker, confidence, minimum, state]
+        search_inputs = [
+            query,
+            alpha,
+            speaker,
+            confidence,
+            minimum,
+            state,
+            episode,
+            scorer,
+            fusion,
+        ]
         submit.click(
             search_callback,
             inputs=search_inputs,
