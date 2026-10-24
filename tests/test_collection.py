@@ -84,9 +84,9 @@ def test_add_callback_outputs_and_episode_search(
     outputs = add_callback("second.wav", False, first)
     both = outputs[0]
     try:
-        assert len(outputs) == 24
+        assert len(outputs) == 26
         assert not first.directory.exists()
-        assert outputs[-1]["choices"][1:] == both.episodes()
+        assert outputs[-3]["choices"][1:] == both.episodes()
         results = search_callback(
             "interest rates", 1.0, "All speakers", 0, 0, both, "a" * 64, "bm25", "rrf"
         )

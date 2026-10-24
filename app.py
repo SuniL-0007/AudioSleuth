@@ -139,7 +139,16 @@ def _empty_results() -> list[Any]:
     ]
 
 
+def _short(label: str, limit: int = 28) -> str:
+    """Keep the episode column narrow; the hash suffix stays visible for disambiguation."""
+    name, _, digest = label.rpartition(" [")
+    if len(label) <= limit or not name:
+        return label
+    return f"{name[: limit - 12].rstrip()}… [{digest}"
+
+
 def _collection_outputs(collection: Collection, elapsed: float) -> list[Any]:
+    """Outputs for every index-building action; also reveals the loaded panel and Search tab."""
     recordings, index = collection.recordings, collection.index
     speakers = sorted({chunk.speaker_id for chunk in index.chunks})
     names = {sha: name for name, sha in collection.episodes()}
@@ -170,7 +179,7 @@ def _collection_outputs(collection: Collection, elapsed: float) -> list[Any]:
     </details></div>"""
     table = [
         [
-            names[chunk.source_sha256],
+            _short(names[chunk.source_sha256]),
             chunk.speaker_id,
             timestamp(chunk.start_ms),
             timestamp(chunk.end_ms),
@@ -191,6 +200,8 @@ def _collection_outputs(collection: Collection, elapsed: float) -> list[Any]:
         "<div class='search-summary'>Index ready. Search for a topic, a tone, or both.</div>",
         *_empty_results(),
         gr.update(choices=[ALL_EPISODES, *collection.episodes()], value=ALL_EPISODES),
+        gr.update(visible=True),
+        gr.Tabs(selected="search"),
     ]
 
 
@@ -264,6 +275,8 @@ def clear_callback(current: Collection | None) -> list[Any]:
         "<div class='search-summary'>No active index.</div>",
         *_empty_results(),
         gr.update(choices=[ALL_EPISODES], value=ALL_EPISODES),
+        gr.update(visible=False),
+        gr.Tabs(selected="ingest"),
         None,
     ]
 
@@ -348,6 +361,12 @@ def build_app() -> gr.Blocks:
         neutral_hue="slate",
         font=["Inter", "Segoe UI", "Arial", "sans-serif"],
         font_mono=["Consolas", "monospace"],
+    ).set(
+        body_background_fill="#f3f6f7",
+        body_background_fill_dark="#0b1a20",
+        block_background_fill_dark="#13242c",
+        block_border_color_dark="#24404b",
+        input_background_fill_dark="#0f1d24",
     )
     with gr.Blocks(
         title="AudioSleuth | Find the moment. Hear the evidence.",
@@ -376,86 +395,103 @@ def build_app() -> gr.Blocks:
             "<div class='empty-banner'>Your listening workspace is ready. "
             "Load the bundled podcast to start instantly, without a GPU or account.</div>"
         )
-        with gr.Tabs():
-            with gr.Tab("01  Ingest & index", id="ingest"):
-                with gr.Row(equal_height=True):
-                    with gr.Column(scale=5, min_width=300):
-                        gr.Markdown(
-                            "### Bring a conversation\nWAV or MP3 · up to 15 minutes · 100 MiB"
+        with gr.Tabs(selected="ingest") as tabs:
+            with gr.Tab("1 · Ingest & index", id="ingest"):
+                with gr.Row():
+                    with gr.Column(scale=4, min_width=300, elem_classes=["as-card", "demo-card"]):
+                        gr.HTML("""
+                        <div class="eyebrow">NO SETUP REQUIRED</div>
+                        <div class="panel-title">Market Signals demo</div>
+                        <p class="panel-sub">A two-voice synthetic podcast about interest
+                        rates, startup valuations, and clean energy, with bundled timestamps
+                        and precomputed vectors. Loads instantly.</p>
+                        <div class="demo-pills"><span>2 voices</span><span>13 moments</span>
+                        <span>Offline</span></div>""")
+                        demo = gr.Button(
+                            "Load Pre-indexed Demo Audio", size="lg", variant="primary"
+                        )
+                        gr.HTML(
+                            "<p class='fine'>Synthetic speech and scripted speaker labels. "
+                            "Offline search uses TF-IDF and signal descriptors, "
+                            "not neural emotion detection.</p>"
+                        )
+                    with gr.Column(scale=5, min_width=300, elem_classes=["as-card"]):
+                        gr.HTML(
+                            "<div class='panel-title'>Your own recording</div>"
+                            "<p class='panel-sub'>WAV or MP3 · up to 15 minutes · 100 MiB · "
+                            "needs the optional WhisperX install</p>"
                         )
                         upload = gr.File(
-                            label="Podcast audio", file_types=[".wav", ".mp3"], type="filepath"
+                            label="Podcast audio",
+                            file_types=[".wav", ".mp3"],
+                            type="filepath",
+                            height=140,
                         )
                         neural = gr.Checkbox(
-                            label="Use neural text + CLAP embeddings (optional ML installation)",
+                            label="Neural embeddings (MiniLM + CLAP, optional ML install)",
                             value=False,
                         )
                         with gr.Row():
-                            process = gr.Button("Process & Index", variant="primary", size="lg")
-                            add = gr.Button("Add to collection", variant="secondary", size="lg")
-                        gr.Markdown(
-                            "**Process** replaces the collection; **Add** indexes another "
-                            "episode alongside the current ones. "
-                            "Uploads require WhisperX. "
-                            "Pyannote needs `HF_TOKEN` and model consent. "
-                            "Missing diarization leaves **UNKNOWN** speakers, "
-                            "not guessed identities."
+                            process = gr.Button("Process & Index", variant="primary")
+                            add = gr.Button("Add to collection", variant="secondary")
+                        gr.HTML(
+                            "<p class='fine'><b>Process</b> replaces the collection; "
+                            "<b>Add</b> indexes another episode beside the current ones. "
+                            "Speaker labels need <code>HF_TOKEN</code>; without it speakers "
+                            "stay UNKNOWN rather than guessed.</p>"
                         )
-                    with gr.Column(scale=4, min_width=300):
-                        gr.HTML("""
-                        <section class="demo-panel"><div class="eyebrow">NO SETUP REQUIRED</div>
-                        <h2>Market Signals</h2>
-                        <p>A two-voice synthetic podcast about interest rates,
-                        startup valuations, and clean energy.
-                        Real playable speech, bundled timestamps,
-                        and precomputed vectors.</p>
-                        <div class="demo-pills"><span>2 voices</span><span>Original script</span>
-                        <span>Offline-ready</span></div>
-                        <p class="fine">Synthetic speech + scripted speaker labels.
-                        Offline search uses TF-IDF and signal descriptors,
-                        not neural emotion detection.</p>
-                        </section>""")
-                        demo = gr.Button(
-                            "Load Pre-indexed Demo Audio", size="lg", variant="secondary"
-                        )
-                with gr.Row():
-                    reindex = gr.Button("Re-index current recording", variant="secondary")
-                    clear = gr.Button("Clear workspace")
-                gr.Markdown(
-                    "Re-index uses the embedding checkbox above and keeps existing words/speakers. "
-                    "The one-click demo always starts offline. "
-                    "Clear removes the active collection; "
-                    "cached media expires separately."
-                )
+                with gr.Row(elem_classes=["workspace-row"]):
+                    reindex = gr.Button(
+                        "Re-index with current setting",
+                        size="sm",
+                        variant="secondary",
+                        scale=0,
+                        min_width=230,
+                    )
+                    clear = gr.Button(
+                        "Clear workspace", size="sm", variant="stop", scale=0, min_width=160
+                    )
+                    gr.HTML(
+                        "<p class='fine'>Re-index switches embeddings without re-transcribing. "
+                        "Clear deletes this session's index and audio files.</p>"
+                    )
                 with gr.Accordion("Local backend readiness", open=False):
                     readiness = gr.Markdown(backend_status())
                     refresh = gr.Button("Refresh backend status", size="sm")
                     refresh.click(backend_status, outputs=[readiness], api_name="backend_status")
-                status = gr.HTML("")
-                source = gr.Audio(
-                    label="Source recording / waveform", interactive=False, type="filepath"
-                )
-                with gr.Accordion("Diarized speaker timeline & provenance", open=True):
-                    timeline = gr.Dataframe(
-                        headers=[
-                            "Episode",
-                            "Speaker",
-                            "Start",
-                            "End",
-                            "Alignment",
-                            "Timing",
-                            "Transcript",
-                        ],
-                        datatype=["str", "str", "str", "str", "number", "str", "str"],
+                with gr.Column(visible=False) as loaded:
+                    status = gr.HTML("")
+                    source = gr.Audio(
+                        label="Source recording (latest episode)",
                         interactive=False,
-                        wrap=True,
-                        label="Indexed speaker turns",
+                        type="filepath",
                     )
-                    manifest = gr.File(label="Download provenance manifest", interactive=False)
-            with gr.Tab("02  Search & listen", id="search"):
-                gr.Markdown(
-                    "### Every result comes with receipts\n"
-                    "Find what was said, how it sounded, and who said it."
+                    with gr.Accordion("Speaker timeline & provenance", open=False):
+                        timeline = gr.Dataframe(
+                            headers=[
+                                "Episode",
+                                "Speaker",
+                                "Start",
+                                "End",
+                                "Align",
+                                "Timing",
+                                "Transcript",
+                            ],
+                            datatype=["str", "str", "str", "str", "number", "str", "str"],
+                            column_widths=["15%", "11%", "9%", "9%", "6%", "8%", "42%"],
+                            interactive=False,
+                            wrap=True,
+                            max_height=420,
+                            label="Indexed speaker turns",
+                        )
+                        manifest = gr.File(
+                            label="Provenance manifest (JSON)", interactive=False, height=60
+                        )
+            with gr.Tab("2 · Search & listen", id="search"):
+                gr.HTML(
+                    "<div class='panel-title'>Every result comes with receipts</div>"
+                    "<p class='panel-sub'>Find what was said, how it sounded, "
+                    "and who said it.</p>"
                 )
                 with gr.Row():
                     query = gr.Textbox(
@@ -488,7 +524,7 @@ def build_app() -> gr.Blocks:
                     episode = gr.Dropdown(
                         choices=[ALL_EPISODES], value=ALL_EPISODES, label="Episode"
                     )
-                with gr.Accordion("Evidence filters & scoring", open=False):
+                with gr.Accordion("Ranking method & evidence filters", open=False):
                     with gr.Row():
                         confidence = gr.Slider(
                             0, 1, value=0, step=0.05, label="Minimum alignment quality"
@@ -543,6 +579,8 @@ def build_app() -> gr.Blocks:
             summary,
             *result_outputs,
             episode,
+            loaded,
+            tabs,
         ]
         demo.click(
             load_demo_callback,

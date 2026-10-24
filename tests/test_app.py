@@ -64,7 +64,7 @@ def test_demo_button_replaces_only_its_own_previous_collection() -> None:
     new = outputs[0]
     try:
         assert isinstance(new, Collection)
-        assert len(outputs) == 24
+        assert len(outputs) == 26
         assert not old.directory.exists()
         assert new.directory.parent == CACHE_ROOT
     finally:
@@ -78,7 +78,7 @@ def test_reindex_preserves_transcript_source_and_speakers() -> None:
     result = reindex_callback(False, old)
     current = result[0]
     try:
-        assert len(result) == 24
+        assert len(result) == 26
         assert current.recording.words == words
         assert current.recording.source_sha256 == source_hash
         assert not old.directory.exists()
@@ -92,13 +92,13 @@ def test_clear_resets_players_upload_and_only_current_collection() -> None:
     current, other = create_collection(), create_collection()
     try:
         result = clear_callback(current)
-        assert len(result) == 25
+        assert len(result) == 27
         assert result[0] is None and result[-1] is None
         assert result[3] == [] and result[4] is None and result[6] is None
         assert not current.directory.exists()
         assert other.directory.exists()
         assert all(result[i] is None for i in (10, 13, 16, 19, 22))
-        assert len(clear_callback(None)) == 25
+        assert len(clear_callback(None)) == 27
     finally:
         dispose(current)
         dispose(other)
